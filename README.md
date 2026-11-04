@@ -59,6 +59,7 @@ git version 2.54.0 (Apple Git-157)
 - [x] 바인드 마운트 변경 반영 확인
 - [x] Docker 볼륨 영속성 확인
 - [x] Git 설정 및 GitHub/VSCode 연동
+- [x] 포트 충돌 진단 및 해제 (프로세스 확인 → 포트 확인 → 해제)
 
 ---
 
@@ -75,6 +76,7 @@ git version 2.54.0 (Apple Git-157)
 | 바인드 마운트 | `-v $(pwd)/app:...` | 호스트 파일 수정이 즉시 반영 | [11장](#11-바인드-마운트-변경-반영) |
 | 볼륨 | `docker volume create`, `-v mydata:/data` | 컨테이너 삭제 후에도 데이터 유지 | [12장](#12-docker-볼륨-영속성) |
 | Git/GitHub | `git config --list`, VSCode 로그인 | 사용자 설정, 원격 저장소 연동 | [13장](#13-git-설정-및-github-연동) |
+| 포트 충돌 | `docker ps --filter`, `lsof -iTCP:8080`, `docker stop` | 점유 컨테이너·프로세스 식별 후 해제 | [14장 ⑤](#-포트-충돌-진단-및-해제-프로세스-확인--포트-확인--해제) |
 
 ---
 
@@ -619,6 +621,115 @@ Git만으로도 혼자 버전 관리는 할 수 있습니다. GitHub는 그 저�
   ```bash
   echo '<h1>Hello from my custom nginx!</h1>' > app/index.html
   ```
+
+### ⑤ 포트 충돌 진단 및 해제 (프로세스 확인 → 포트 확인 → 해제)
+
+포트 충돌이 났을 때 원인을 찾아 해결하는 과정을 직접 재현하고 단계별로 기록했습니다.
+
+#### 0단계. 문제 발생: 이미 사용 중인 포트로 컨테이너 실행
+
+`web` 컨테이너가 8080을 쓰고 있는 상태에서, 같은 호스트 포트로 컨테이너를 하나 더 실행했습니다.
+
+```bash
+$ docker run -d --name web2 -p 8080:80 my-web:1.0
+dd9b7e6f120645ffa6dd5124743a59e8cdbc73b4aa874636fc9a024b5ffcdf85
+docker: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint web2 (815bd61e4fc8...): Bind for 0.0.0.0:8080 failed: port is already allocated
+```
+
+- **원인 가설**: 호스트의 8080 포트를 다른 컨테이너(또는 다른 프로그램)가 이미 점유하고 있다.
+- 에러가 나도 `web2` 컨테이너는 **생성(Created) 상태로 남기 때문에**, 재시도하기 전에 `docker rm -f web2`로 정리해야 합니다. 정리하지 않으면 이름 충돌이 추가로 발생합니다 (트러블슈팅 ③ 참고).
+
+#### 1단계. 프로세스 확인: 어떤 컨테이너가 8080을 쓰고 있는가
+
+```bash
+$ docker ps
+CONTAINER ID   IMAGE          COMMAND                  CREATED          STATUS          PORTS                                     NAMES
+28dbbd928bf9   nginx:alpine   "/docker-entrypoint.…"   41 minutes ago   Up 41 minutes   0.0.0.0:8081->80/tcp, [::]:8081->80/tcp   web-bind
+142c5b1d032c   my-web:1.0     "/docker-entrypoint.…"   44 minutes ago   Up 44 minutes   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web
+
+$ docker ps --filter "publish=8080"
+CONTAINER ID   IMAGE        COMMAND                  CREATED          STATUS          PORTS                                     NAMES
+142c5b1d032c   my-web:1.0   "/docker-entrypoint.…"   44 minutes ago   Up 44 minutes   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web
+```
+
+→ `--filter "publish=8080"`으로 호스트 8080을 공개(publish)한 컨테이너만 걸러 보니 **`web` 컨테이너**가 점유 중인 것을 확인했습니다.
+
+#### 2단계. 포트 확인: 호스트(맥)에서 8080을 LISTEN 중인 프로세스
+
+```bash
+$ lsof -nP -iTCP:8080 -sTCP:LISTEN
+COMMAND     PID     USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+OrbStack  93081 kimjiyou  104u  IPv4 0x37378693e7ce64ef      0t0  TCP *:8080 (LISTEN)
+OrbStack  93081 kimjiyou  106u  IPv6 0xfd7e4725c7427d04      0t0  TCP *:8080 (LISTEN)
+```
+
+| 옵션 | 의미 |
+|---|---|
+| `-iTCP:8080` | TCP 8080 포트를 사용하는 것만 조회 |
+| `-sTCP:LISTEN` | 연결을 기다리는(LISTEN) 상태만 조회 |
+| `-n`, `-P` | IP 주소와 포트 번호를 이름으로 바꾸지 않고 숫자 그대로 표시 (조회 속도 향상) |
+
+→ 호스트에서는 **OrbStack 프로세스(PID 93081)**가 8080을 IPv4·IPv6 모두 LISTEN하고 있었습니다. 컨테이너의 포트 매핑은 OrbStack이 호스트 포트를 대신 열어 컨테이너로 전달하는 방식이기 때문입니다. 1단계 결과와 합치면 **"web 컨테이너의 `-p 8080:80` 매핑 때문에 OrbStack이 8080을 점유 중"**이라는 결론이 나옵니다.
+
+> 만약 여기서 OrbStack이 아닌 다른 프로그램(예: 로컬 개발 서버)이 나온다면, 컨테이너가 아니라 그 프로세스가 원인입니다. 이 경우 해당 프로그램을 종료하거나 `kill <PID>`로 정리합니다.
+
+#### 3단계. 해제: 점유 중인 컨테이너를 중지하고 재실행
+
+```bash
+$ docker stop web
+web
+
+$ lsof -nP -iTCP:8080 -sTCP:LISTEN
+(출력 없음)
+```
+
+→ `web`을 중지하자 8080을 LISTEN하는 프로세스가 사라져 **포트가 해제**된 것을 확인했습니다.
+
+```bash
+$ docker rm -f web2          # 0단계에서 생성 상태로 남은 web2 정리
+$ docker run -d --name web2 -p 8080:80 my-web:1.0
+97bb210fde635fe6088438106a7f72da6087a3d02ec0be60f180ba7c88d05898
+
+$ docker ps
+CONTAINER ID   IMAGE          COMMAND                  CREATED          STATUS          PORTS                                     NAMES
+97bb210fde63   my-web:1.0     "/docker-entrypoint.…"   3 seconds ago    Up 2 seconds    0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web2
+28dbbd928bf9   nginx:alpine   "/docker-entrypoint.…"   43 minutes ago   Up 43 minutes   0.0.0.0:8081->80/tcp, [::]:8081->80/tcp   web-bind
+
+$ curl localhost:8080
+<h1>Hello from my custom nginx!</h1>
+```
+
+→ 같은 8080 포트로 `web2`가 정상 실행되고 응답하는 것을 확인했습니다.
+
+#### 대안: 기존 컨테이너를 유지해야 할 때
+
+기존 컨테이너를 멈출 수 없다면 **호스트 포트만 다른 번호로 바꿔** 실행하면 됩니다. 컨테이너 내부 포트(80)는 그대로 둡니다.
+
+```bash
+docker run -d --name web3 -p 8082:80 my-web:1.0
+curl localhost:8082
+```
+
+#### 정리 및 원상 복구
+
+```bash
+docker rm -f web2
+docker start web
+```
+
+#### 진단 과정에서 겪은 문제: 주석이 명령 인자로 들어감
+
+`docker stop web   # 8080을 쓰던 컨테이너 중지`처럼 **주석을 붙인 채로 붙여 넣었더니**, zsh가 `#` 뒤의 단어들을 컨테이너 이름으로 해석해 `No such container: #`, `No such container: 8080을` 같은 에러가 났습니다. macOS의 zsh는 **대화형 모드에서 `#` 주석을 기본으로 지원하지 않기** 때문입니다 (`setopt interactivecomments`로 켤 수 있음). 이후에는 주석 없이 명령만 한 줄씩 실행해서 해결했습니다.
+
+#### 요약
+
+| 단계 | 명령 | 확인한 것 |
+|---|---|---|
+| 문제 | `docker run -p 8080:80 ...` | `port is already allocated` |
+| ① 프로세스 확인 | `docker ps --filter "publish=8080"` | `web` 컨테이너가 8080 사용 중 |
+| ② 포트 확인 | `lsof -nP -iTCP:8080 -sTCP:LISTEN` | OrbStack(PID 93081)이 8080 LISTEN |
+| ③ 해제 | `docker stop web` → `lsof` 재확인 | LISTEN 프로세스 없음 → 해제 완료 |
+| 검증 | `docker run ... -p 8080:80` → `curl` | 새 컨테이너 정상 응답 |
 
 ---
 
