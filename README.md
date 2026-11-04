@@ -73,7 +73,7 @@ git version 2.54.0 (Apple Git-157)
 | 컨테이너 운영 | `docker run`, `ps`, `logs`, `stats` | 실행/종료 상태, 로그, 리소스 | [8장](#8-docker-기본-운영-및-컨테이너-실습) |
 | 커스텀 이미지 | `docker build`, `docker run -p` | 빌드 성공, 커스텀 페이지 응답 | [9장](#9-dockerfile-기반-커스텀-이미지) |
 | 포트 매핑 | `curl localhost:8080`, 브라우저 | 호스트에서 컨테이너 웹 서버 접속 | [10장](#10-포트-매핑-접속-증거) |
-| 바인드 마운트 | `-v $(pwd)/app:...` | 호스트 파일 수정이 즉시 반영 | [11장](#11-바인드-마운트-변경-반영) |
+| 바인드 마운트 | `-v $(pwd)/app:...`, `curl localhost:8081`, 브라우저 | 호스트 파일 수정이 즉시 반영 | [11장](#11-바인드-마운트-변경-반영) |
 | 볼륨 | `docker volume create`, `-v mydata:/data` | 컨테이너 삭제 후에도 데이터 유지 | [12장](#12-docker-볼륨-영속성) |
 | Git/GitHub | `git config --list`, VSCode 로그인 | 사용자 설정, 원격 저장소 연동 | [13장](#13-git-설정-및-github-연동) |
 | 포트 충돌 | `docker ps --filter`, `lsof -iTCP:8080`, `docker stop` | 점유 컨테이너·프로세스 식별 후 해제 | [14장 ⑤](#-포트-충돌-진단-및-해제-프로세스-확인--포트-확인--해제) |
@@ -454,6 +454,12 @@ $ curl localhost:8081
 
 → 호스트 파일을 수정하자 컨테이너 응답이 즉시 바뀌었습니다. 바인드 마운트는 호스트 경로를 그대로 공유하므로, 개발 중 코드 변경을 바로 확인할 때 유용합니다.
 
+브라우저에서 `http://localhost:8081` 접속 화면 (호스트 파일 변경 전 / 후):
+
+| 변경 전 | 변경 후 |
+|---|---|
+| ![바인드 마운트 변경 전](docs/images/bind-before.png) | ![바인드 마운트 변경 후](docs/images/bind-after.png) |
+
 ---
 
 ## 12. Docker 볼륨 영속성
@@ -744,6 +750,8 @@ dev-workstation/
 ├── docs/
 │   └── images/        # 증거 스크린샷
 │       ├── port.png
+│       ├── bind-before.png
+│       ├── bind-after.png
 │       ├── vscode-login.png
 │       └── github-repo.png
 └── practice/          # 터미널·권한 실습 파일
